@@ -16,22 +16,20 @@
       .panel strong { color: #fafafa; }
       #map { height: 100%; }
 
-      /* -------- Custom tools control (no leaflet-bar; clean box) -------- */
+      /* -------- Custom tools control -------- */
       .leaflet-control-custom { background: transparent; }
       .tools-box {
         background:#1c1c21; color:#eaeaea;
         border:1px solid #2a2a2f; border-radius:8px;
         box-shadow:0 1px 3px rgba(0,0,0,.35);
-        overflow:hidden;
-        min-width: 180px;
+        overflow:hidden; min-width: 180px;
       }
       .tools-box .section { padding: 8px 12px; border-bottom:1px solid #2a2a2f; }
       .tools-box .section:last-child { border-bottom: 0; }
       .tools-box button {
         width: 100%;
         display:flex; align-items:center; gap:8px;
-        padding:8px 12px;
-        background:transparent; color:#eaeaea;
+        padding:8px 12px; background:transparent; color:#eaeaea;
         border:0; border-top:1px solid #2a2a2f;
         font: 13px/1.2 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
         cursor:pointer; text-align:left;
@@ -41,14 +39,11 @@
       .tools-box .state { margin-left:auto; opacity:.9; }
       .tools-box .active { outline:2px solid #50fa7b66; outline-offset:-2px; border-radius:6px; }
       .tools-box select {
-        width: 100%;
-        margin-top: 6px;
+        width: 100%; margin-top: 6px;
         background:#16161a; color:#eaeaea; border:1px solid #2a2a2f; border-radius:6px;
         padding:6px 8px; font-size:13px;
       }
-      .legend {
-        display:flex; flex-direction:column; gap:6px; margin-top:8px; font-size:12px; opacity:.9;
-      }
+      .legend { display:flex; flex-direction:column; gap:6px; margin-top:8px; font-size:12px; opacity:.9; }
       .legend-item { display:flex; align-items:center; gap:8px; }
       .chip { width:12px; height:12px; border-radius:50%; border:2px solid currentColor; }
     </style>
@@ -71,11 +66,10 @@
 
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin></script>
     <script>
-      // --- WebSocket endpoint
       const WS_URL = 'ws://127.0.0.1:8765';
       document.getElementById('wsUrl').textContent = WS_URL;
 
-      // --- Base layers (max zoom 26; tiles often native 19/20)
+      // --- Base layers
       const osm = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
         maxZoom: 26, maxNativeZoom: 19, attribution: '&copy; OpenStreetMap contributors'
       });
@@ -90,196 +84,136 @@
         }
       );
 
-      // Map init
       const map = L.map('map', { layers: [osm] }).setView([48.8566, 2.3522], 13);
       L.control.layers({ "OSM": osm, "Satellite": esriSat, "Toner Lite": tonerLite }, {}, { position: 'topleft' }).addTo(map);
 
-      // --- State per device
-      const palette = ['#4CAF50', '#1E90FF', '#FF9800', '#E91E63', '#9C27B0', '#00BCD4', '#FFC107', '#8BC34A'];
-      const devices = new Map(); // source -> {marker, circle, track, last, color}
-      let firstFix = true;
-      let follow = false;
-      let userPanned = false;
-      let activeSource = null;
+      const palette = ['#4CAF50','#1E90FF','#FF9800','#E91E63','#9C27B0','#00BCD4','#FFC107','#8BC34A'];
+      const devices = new Map();
+      let firstFix = true, follow = false, userPanned = false, activeSource = null;
 
-      // --- Custom control (left column, below layer control)
+      // --- Custom Tools Panel ---
       const ToolsControl = L.Control.extend({
         options: { position: 'topleft' },
-        onAdd: function () {
+        onAdd: function() {
           const wrapper = L.DomUtil.create('div', 'leaflet-control leaflet-control-custom');
           const box = L.DomUtil.create('div', 'tools-box', wrapper);
 
-          // Section: device selector
+          // Device selector
           const secSel = L.DomUtil.create('div', 'section', box);
-          const label = L.DomUtil.create('div', '', secSel);
-          label.textContent = 'Device';
-          label.style.opacity = '0.8';
+          secSel.innerHTML = `<div style="opacity:.8">Device</div>`;
           const sel = L.DomUtil.create('select', '', secSel);
           sel.id = 'deviceSelect';
           sel.addEventListener('change', () => { activeSource = sel.value || null; });
 
-          // Section: actions
+          // Actions
           const secAct = L.DomUtil.create('div', 'section', box);
-          const bCenter = L.DomUtil.create('button', '', secAct);
-          bCenter.type = 'button';
-          bCenter.title = 'Center on selected device (C)';
-          bCenter.textContent = 'Center';
-          const bFollow = L.DomUtil.create('button', '', secAct);
-          bFollow.type = 'button';
-          bFollow.id = 'btnFollow';
-          bFollow.title = 'Toggle follow (F) for selected device';
-          bFollow.innerHTML = `<span>Follow</span><span class="state" id="followState">OFF</span>`;
-
-          // Section: legend (auto-filled)
-          const secLegend = L.DomUtil.create('div', 'section', box);
-          secLegend.id = 'legend';
-          secLegend.innerHTML = '<div style="opacity:.8">Legend</div><div class="legend" id="legendList"></div>';
+          const bCenter = L.DomUtil.create('button', '', secAct); bCenter.textContent = 'Center';
+          const bFollow = L.DomUtil.create('button', '', secAct); bFollow.id = 'btnFollow'; bFollow.innerHTML = `<span>Follow</span><span class="state" id="followState">OFF</span>`;
+          const bClear = L.DomUtil.create('button', '', secAct); bClear.textContent = 'Clear Path';
 
           L.DomEvent.disableClickPropagation(wrapper);
-          L.DomEvent.on(bCenter, 'click', (e) => { L.DomEvent.preventDefault(e); centerOnActive(); });
-          L.DomEvent.on(bFollow, 'click', (e) => { L.DomEvent.preventDefault(e); setFollow(!follow); });
+          L.DomEvent.on(bCenter,'click',(e)=>{L.DomEvent.preventDefault(e);centerOnActive();});
+          L.DomEvent.on(bFollow,'click',(e)=>{L.DomEvent.preventDefault(e);setFollow(!follow);});
+          L.DomEvent.on(bClear,'click',(e)=>{L.DomEvent.preventDefault(e);clearPaths();});
+
+          // Legend
+          const secLegend = L.DomUtil.create('div', 'section', box);
+          secLegend.innerHTML = '<div style="opacity:.8">Legend</div><div class="legend" id="legendList"></div>';
 
           return wrapper;
         }
       });
       map.addControl(new ToolsControl());
 
-      // --- Header bindings
-      const $fixQ = document.getElementById('fixQ');
-      const $sats = document.getElementById('sats');
-      const $hdop = document.getElementById('hdop');
-      const $alt  = document.getElementById('alt');
-      const $utc  = document.getElementById('utc');
-      const $dot  = document.getElementById('statusDot');
-
-      function setOnline(on) { $dot.classList.toggle('ok', !!on); }
-      function updateStats(d) {
-        $fixQ.textContent = d.fix_quality ?? '0';
-        $sats.textContent = d.num_sats ?? '0';
-        $hdop.textContent = d.hdop ?? '—';
-        $alt.textContent  = d.alt_m ?? '—';
-        $utc.textContent  = d.timestamp_utc ?? '—';
+      // Header bindings
+      const $fixQ=document.getElementById('fixQ'),$sats=document.getElementById('sats'),
+            $hdop=document.getElementById('hdop'),$alt=document.getElementById('alt'),
+            $utc=document.getElementById('utc'),$dot=document.getElementById('statusDot');
+      function setOnline(on){$dot.classList.toggle('ok',!!on);}
+      function updateStats(d){
+        $fixQ.textContent=d.fix_quality??'0';
+        $sats.textContent=d.num_sats??'0';
+        $hdop.textContent=d.hdop??'—';
+        $alt.textContent=d.alt_m??'—';
+        $utc.textContent=d.timestamp_utc??'—';
       }
 
-      function ensureDevice(source) {
-        if (devices.has(source)) return devices.get(source);
-        const color = palette[devices.size % palette.length];
-        const state = {
-          color,
-          marker: null,
-          circle: null,
-          track: L.polyline([], { weight: 3, color }).addTo(map),
-          last: null
-        };
-        devices.set(source, state);
+      // Devices management
+      function ensureDevice(source){
+        if(devices.has(source)) return devices.get(source);
+        const color=palette[devices.size%palette.length];
+        const state={color,marker:null,circle:null,track:L.polyline([], {weight:3,color}).addTo(map),last:null};
+        devices.set(source,state);
 
-        // selector option
-        const sel = document.getElementById('deviceSelect');
-        if (sel && ![...sel.options].some(o => o.value === source)) {
-          const opt = document.createElement('option');
-          opt.value = source; opt.textContent = source;
+        const sel=document.getElementById('deviceSelect');
+        if(sel && ![...sel.options].some(o=>o.value===source)){
+          const opt=document.createElement('option'); opt.value=source; opt.textContent=source;
           sel.appendChild(opt);
-          if (!activeSource) { activeSource = source; sel.value = source; }
+          if(!activeSource){activeSource=source; sel.value=source;}
         }
-
-        // legend chip
-        const list = document.getElementById('legendList');
-        if (list && !document.getElementById('legend_' + source)) {
-          const row = document.createElement('div');
-          row.className = 'legend-item';
-          row.id = 'legend_' + source;
-          const chip = document.createElement('span');
-          chip.className = 'chip';
-          chip.style.color = color;
-          const text = document.createElement('span');
-          text.textContent = source;
-          row.appendChild(chip); row.appendChild(text);
-          list.appendChild(row);
+        const list=document.getElementById('legendList');
+        if(list && !document.getElementById('legend_'+source)){
+          const row=document.createElement('div'); row.className='legend-item'; row.id='legend_'+source;
+          const chip=document.createElement('span'); chip.className='chip'; chip.style.color=color;
+          const text=document.createElement('span'); text.textContent=source;
+          row.appendChild(chip); row.appendChild(text); list.appendChild(row);
         }
-
         return state;
       }
 
-      function setFollow(on) {
-        follow = !!on;
-        const btn = document.getElementById('btnFollow');
-        const state = document.getElementById('followState');
-        if (btn) btn.classList.toggle('active', follow);
-        if (state) state.textContent = follow ? 'ON' : 'OFF';
-        if (follow && activeSource && devices.get(activeSource)?.last) {
-          map.setView(devices.get(activeSource).last, Math.max(map.getZoom(), 20));
-          userPanned = false;
+      function setFollow(on){
+        follow=!!on;
+        const btn=document.getElementById('btnFollow'); const state=document.getElementById('followState');
+        if(btn) btn.classList.toggle('active',follow);
+        if(state) state.textContent=follow?'ON':'OFF';
+        if(follow && activeSource && devices.get(activeSource)?.last){
+          map.setView(devices.get(activeSource).last,Math.max(map.getZoom(),20)); userPanned=false;
         }
       }
-
-      function centerOnActive() {
-        if (!activeSource) return;
-        const d = devices.get(activeSource);
-        if (d?.last) {
-          map.setView(d.last, Math.max(map.getZoom(), 20));
-          userPanned = false;
-        }
+      function centerOnActive(){
+        if(!activeSource) return; const d=devices.get(activeSource);
+        if(d?.last){map.setView(d.last,Math.max(map.getZoom(),20));userPanned=false;}
+      }
+      function clearPaths(){
+        devices.forEach((dev)=>{
+          dev.track.setLatLngs([]); // clear polyline
+        });
       }
 
-      function updatePositionFor(source, lat, lon, hdop) {
-        const dev = ensureDevice(source);
-        const latlng = [lat, lon];
-        dev.last = latlng;
-
-        const radius = typeof hdop === 'number' ? Math.max(1, hdop * 5) : 5;
-
-        if (!dev.marker) {
-          dev.marker = L.circleMarker(latlng, { radius: 6, weight: 2, color: dev.color, fillOpacity: 0.7 }).addTo(map);
-        } else {
-          dev.marker.setLatLng(latlng);
-        }
-
-        if (!dev.circle) {
-          dev.circle = L.circle(latlng, { radius, color: dev.color, opacity: 0.35 });
-          dev.circle.addTo(map);
-        } else {
-          dev.circle.setLatLng(latlng).setRadius(radius);
-        }
-
+      function updatePositionFor(source,lat,lon,hdop){
+        const dev=ensureDevice(source); const latlng=[lat,lon]; dev.last=latlng;
+        const radius=typeof hdop==='number'?Math.max(1,hdop*5):5;
+        if(!dev.marker){dev.marker=L.circleMarker(latlng,{radius:6,weight:2,color:dev.color,fillOpacity:0.7}).addTo(map);}else dev.marker.setLatLng(latlng);
+        if(!dev.circle){dev.circle=L.circle(latlng,{radius,color:dev.color,opacity:0.35}).addTo(map);}else dev.circle.setLatLng(latlng).setRadius(radius);
         dev.track.addLatLng(latlng);
-
-        if (firstFix) {
-          map.setView(latlng, 20);
-          firstFix = false;
-          userPanned = false;
-        } else if (follow && activeSource === source && !userPanned) {
-          map.panTo(latlng, { animate: true });
-        }
+        if(firstFix){map.setView(latlng,20);firstFix=false;userPanned=false;}
+        else if(follow && activeSource===source && !userPanned) map.panTo(latlng,{animate:true});
       }
 
-      map.on('dragstart zoomstart', () => { userPanned = true; });
+      map.on('dragstart zoomstart',()=>{userPanned=true;});
 
-      // --- WebSocket client ---
-      let ws, retry = 0;
-      function connect() {
-        ws = new WebSocket(WS_URL);
-        ws.onopen  = () => { setOnline(true); retry = 0; };
-        ws.onclose = () => { setOnline(false); setTimeout(connect, Math.min(10000, 500 * Math.pow(2, retry++))); };
-        ws.onerror = () => { try { ws.close(); } catch {} };
-        ws.onmessage = (e) => {
-          try {
-            const d = JSON.parse(e.data);
-            if (d.type === 'gga') {
-              updateStats(d);
-              const src = d.source || 'dev'; // fallback if server doesn't send "source"
-              if (typeof d.lat === 'number' && typeof d.lon === 'number') {
-                updatePositionFor(src, d.lat, d.lon, d.hdop);
-              }
+      // WebSocket client
+      let ws,retry=0;
+      function connect(){
+        ws=new WebSocket(WS_URL);
+        ws.onopen=()=>{setOnline(true);retry=0;};
+        ws.onclose=()=>{setOnline(false);setTimeout(connect,Math.min(10000,500*Math.pow(2,retry++)));};
+        ws.onerror=()=>{try{ws.close();}catch{}};
+        ws.onmessage=(e)=>{
+          try{
+            const d=JSON.parse(e.data);
+            if(d.type==='gga'){
+              updateStats(d); const src=d.source||'dev';
+              if(typeof d.lat==='number'&&typeof d.lon==='number') updatePositionFor(src,d.lat,d.lon,d.hdop);
             }
-          } catch {}
+          }catch{}
         };
-      }
-      connect();
+      } connect();
 
-      // Shortcuts
-      window.addEventListener('keydown', (e) => {
-        if (e.key.toLowerCase() === 'c') centerOnActive();
-        if (e.key.toLowerCase() === 'f') setFollow(!follow);
+      // Keyboard shortcuts
+      window.addEventListener('keydown',(e)=>{
+        if(e.key.toLowerCase()==='c') centerOnActive();
+        if(e.key.toLowerCase()==='f') setFollow(!follow);
       });
     </script>
   </body>
