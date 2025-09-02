@@ -4,21 +4,41 @@
     <meta charset="utf-8" />
     <title>GNSS Live Position (Leaflet + WebSocket)</title>
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <link
-      rel="stylesheet"
-      href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
-      crossorigin=""
-    />
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="">
     <style>
       html, body {height: 100%; margin: 0; background: #0b0b0c; color: #eaeaea;}
       #app {height: 100%; display: grid; grid-template-rows: auto 1fr;}
-      header {padding: 10px 14px; display: flex; align-items: center; gap: 12px; border-bottom: 1px solid #232327;}
-      .dot {width: 10px; height: 10px; border-radius: 50%; background: #ff5555; box-shadow: 0 0 8px #ff5555aa;}
-      .dot.ok {background: #50fa7b; box-shadow: 0 0 8px #50fa7baa;}
-      .mono {font-family: monospace;}
-      #map {height: 100%;}
-      .panel {display: flex; gap: 18px; flex-wrap: wrap; align-items: baseline; font-size: 14px;}
-      .panel strong {color: #fafafa;}
+      header {padding: 10px 14px; display: flex; gap: 12px; align-items: center; border-bottom: 1px solid #232327;}
+      .dot {width:10px;height:10px;border-radius:50%;background:#ff5555;box-shadow:0 0 8px #ff5555aa;}
+      .dot.ok {background:#50fa7b;box-shadow:0 0 8px #50fa7baa;}
+      .mono {font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;}
+      .panel {display:flex;gap:18px;flex-wrap:wrap;align-items:baseline;font-size:14px;}
+      .panel strong {color:#fafafa;}
+      #map {height:100%;}
+
+      /* -------- Custom tools control (NOT using leaflet-bar) -------- */
+      .leaflet-control-custom {
+        background: transparent;  /* Leaflet needs the wrapper class but we style inner box */
+      }
+      .tools-box {
+        background:#1c1c21; color:#eaeaea;
+        border:1px solid #2a2a2f; border-radius:8px;
+        box-shadow: 0 1px 3px rgba(0,0,0,.35);
+        overflow:hidden;  /* for the divider line */
+      }
+      .tools-box button {
+        width: 100%;
+        display:flex; align-items:center; gap:8px;
+        padding:8px 12px;
+        background:transparent; color:#eaeaea;
+        border:0; border-bottom:1px solid #2a2a2f;
+        font: 13px/1.2 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+        cursor:pointer; text-align:left;
+      }
+      .tools-box button:last-child { border-bottom:0; }
+      .tools-box button:hover { background:#24242b; }
+      .tools-box .state { margin-left:auto; opacity:.9; }
+      .tools-box .active { outline:2px solid #50fa7b66; outline-offset:-2px; border-radius:6px; }
     </style>
   </head>
   <body>
@@ -37,23 +57,66 @@
       <div id="map"></div>
     </div>
 
-    <!-- Load Leaflet first -->
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
-
-    <!-- Main script -->
     <script>
       const WS_URL = 'ws://127.0.0.1:8765';
       document.getElementById('wsUrl').textContent = WS_URL;
 
-      const map = L.map('map').setView([48.8566, 2.3522], 13);
-      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-        maxZoom: 19,
-        attribution: '&copy; OpenStreetMap contributors',
-      }).addTo(map);
+      // --- Base layers (zoom up to 26; tiles native ~19/20) ---
+      const osm = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        maxZoom: 26, maxNativeZoom: 19, attribution: '&copy; OpenStreetMap contributors'
+      });
+      const esriSat = L.tileLayer(
+        'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+          maxZoom: 26, attribution: 'Tiles &copy; Esri'
+        }
+      );
+      const tonerLite = L.tileLayer(
+        'https://stamen-tiles.a.ssl.fastly.net/toner-lite/{z}/{x}/{y}.png', {
+          maxZoom: 26, maxNativeZoom: 20, attribution: 'Tiles by <a href="http://stamen.com">Stamen</a>'
+        }
+      );
 
+      const map = L.map('map', { layers: [osm] }).setView([48.8566, 2.3522], 13);
+
+      // Layers control (stack under +/- at top-left)
+      L.control.layers(
+        { "OSM": osm, "Satellite": esriSat, "Toner Lite": tonerLite },
+        {}, { position: 'topleft' }
+      ).addTo(map);
+
+      // --- Our custom tools as a clean control (no leaflet-bar) ---
+      const ToolsControl = L.Control.extend({
+        options: { position: 'topleft' },
+        onAdd: function() {
+          const wrapper = L.DomUtil.create('div', 'leaflet-control leaflet-control-custom');
+          const box = L.DomUtil.create('div', 'tools-box', wrapper);
+
+          const bCenter = L.DomUtil.create('button', '', box);
+          bCenter.type = 'button';
+          bCenter.title = 'Center on last GNSS position (C)';
+          bCenter.textContent = 'Center';
+
+          const bFollow = L.DomUtil.create('button', '', box);
+          bFollow.type = 'button';
+          bFollow.id = 'btnFollow';
+          bFollow.title = 'Toggle follow mode (F)';
+          bFollow.innerHTML = `<span>Follow</span><span class="state" id="followState">OFF</span>`;
+
+          // Prevent map drag when interacting with the box
+          L.DomEvent.disableClickPropagation(wrapper);
+          L.DomEvent.on(bCenter, 'click', (e) => { L.DomEvent.preventDefault(e); centerOnLast(); });
+          L.DomEvent.on(bFollow, 'click', (e) => { L.DomEvent.preventDefault(e); setFollow(!follow); });
+
+          return wrapper;
+        }
+      });
+      map.addControl(new ToolsControl());
+
+      // --- GNSS state & UI wiring ---
       let marker = null, circle = null;
-      const track = L.polyline([], {weight: 3}).addTo(map);
-      let firstFix = true;
+      const track = L.polyline([], { weight: 3 }).addTo(map);
+      let firstFix = true, lastLatLng = null, follow = false, userPanned = false;
 
       const $fixQ = document.getElementById('fixQ');
       const $sats = document.getElementById('sats');
@@ -70,36 +133,61 @@
         $alt.textContent  = d.alt_m ?? '—';
         $utc.textContent  = d.timestamp_utc ?? '—';
       }
-      function updatePosition(lat, lon, hdop) {
-        const latlng = [lat, lon];
-        const radius = typeof hdop === 'number' ? Math.max(1, hdop * 5) : 5;
-        if (!marker) marker = L.marker(latlng).addTo(map); else marker.setLatLng(latlng);
-        if (!circle) circle = L.circle(latlng, {radius}).addTo(map); else circle.setLatLng(latlng).setRadius(radius);
-        track.addLatLng(latlng);
-        if (firstFix) { map.setView(latlng, 18); firstFix = false; }
+
+      function setFollow(on) {
+        follow = !!on;
+        const btn = document.getElementById('btnFollow');
+        const state = document.getElementById('followState');
+        if (btn) btn.classList.toggle('active', follow);
+        if (state) state.textContent = follow ? 'ON' : 'OFF';
+        if (follow && lastLatLng) {
+          map.setView(lastLatLng, Math.max(map.getZoom(), 20));
+          userPanned = false;
+        }
       }
 
+      function centerOnLast() {
+        if (!lastLatLng) return;
+        map.setView(lastLatLng, Math.max(map.getZoom(), 20));
+        userPanned = false;
+      }
+
+      function updatePosition(lat, lon, hdop) {
+        const latlng = [lat, lon];
+        lastLatLng = latlng;
+        const radius = typeof hdop === 'number' ? Math.max(1, hdop * 5) : 5;
+
+        if (!marker) marker = L.marker(latlng).addTo(map); else marker.setLatLng(latlng);
+        if (!circle) circle = L.circle(latlng, { radius }).addTo(map); else circle.setLatLng(latlng).setRadius(radius);
+        track.addLatLng(latlng);
+
+        if (firstFix) { map.setView(latlng, 20); firstFix = false; userPanned = false; return; }
+        if (follow && !userPanned) map.panTo(latlng, { animate: true });
+      }
+
+      map.on('dragstart zoomstart', () => { userPanned = true; });
+      window.addEventListener('keydown', (e) => {
+        if (e.key.toLowerCase() === 'c') centerOnLast();
+        if (e.key.toLowerCase() === 'f') setFollow(!follow);
+      });
+
+      // --- WebSocket client ---
       let ws, retry = 0;
       function connect() {
-        console.log('[WS] connecting to', WS_URL);
         ws = new WebSocket(WS_URL);
-
-        ws.onopen = () => { console.log('[WS] open'); setOnline(true); retry = 0; };
-        ws.onclose = (ev) => {
-          console.warn('[WS] close', ev.code, ev.reason); setOnline(false);
-          const timeout = Math.min(10000, 500 * Math.pow(2, retry++));
-          setTimeout(connect, timeout);
-        };
-        ws.onerror = (err) => { console.error('[WS] error', err); try { ws.close(); } catch {} };
+        ws.onopen  = () => { setOnline(true);  retry = 0; };
+        ws.onclose = () => { setOnline(false); setTimeout(connect, Math.min(10000, 500 * Math.pow(2, retry++))); };
+        ws.onerror = () => { try { ws.close(); } catch {} };
         ws.onmessage = (e) => {
           try {
-            const data = JSON.parse(e.data);
-            if (data.type === 'gga') {
-              updateStats(data);
-              if (typeof data.lat === 'number' && typeof data.lon === 'number')
-                updatePosition(data.lat, data.lon, data.hdop);
+            const d = JSON.parse(e.data);
+            if (d.type === 'gga') {
+              updateStats(d);
+              if (typeof d.lat === 'number' && typeof d.lon === 'number') {
+                updatePosition(d.lat, d.lon, d.hdop);
+              }
             }
-          } catch (ex) { console.error('[WS] parse error', ex, e.data); }
+          } catch {}
         };
       }
       connect();
