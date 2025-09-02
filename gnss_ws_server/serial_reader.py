@@ -1,4 +1,6 @@
+# serial_reader.py  (ajouts marqués)
 import threading
+from queue import Queue, Empty  # NEW
 from serial import Serial, SerialException
 from .nmea_parser import NMEA_LINE
 
@@ -13,11 +15,25 @@ class SerialReader(threading.Thread):
         self.queue = queue
         self.stop_event = stop_event
         self.loop = loop
+        self._inject_q = Queue()  # NEW
+
+    # NEW: appelé par NtripClient pour pousser du RTCM vers le port
+    def inject(self, data: bytes):
+        if data:
+            self._inject_q.put(data)
 
     def run(self):
         try:
             with Serial(self.port, self.baud, timeout=1) as ser:
                 while not self.stop_event.is_set():
+                    # NEW: vider les injections en attente
+                    try:
+                        while True:
+                            payload = self._inject_q.get_nowait()
+                            ser.write(payload)
+                    except Empty:
+                        pass
+
                     try:
                         raw = ser.readline()
                         if not raw:

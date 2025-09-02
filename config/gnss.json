@@ -1,0 +1,36 @@
+{
+  "host": "127.0.0.1",
+  "ws_port": 8765,
+
+  "defaults": {
+    "baud": 230400,
+    "gga_period_sec": 10
+  },
+
+  "receivers": [
+    {
+      "port": "COM27",
+      "label": "BASE",
+      "baud": 230400
+    },
+    {
+      "port": "COM9",
+      "label": "ROVER",
+      "baud": 230400,
+      "correction": {
+        "type": "ntrip",
+        "url": "ntrip://centipede:centipede@crtk.net:2101/BEFF",
+        "send_gga": true,
+        "gga_source": "ROVER",
+        "gga_period_sec": 10
+      }
+    },
+    {
+      "port": "COM11",
+      "label": "REF"
+    }
+  ],
+
+  "log_level": "INFO"
+}
+  

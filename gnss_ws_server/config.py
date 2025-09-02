@@ -20,29 +20,24 @@ def find_default_serial_port():
     return candidates[0] if candidates else None
 
 
-def parse_args():
-    parser = argparse.ArgumentParser(
-        description="GNSS/RTK NMEA ($GxGGA) WebSocket server (multi-receiver)"
-    )
-    parser.add_argument(
-        "--port",
-        action="append",
-        default=[],
-        help="Serial port(s). Repeat --port or use comma list. Use 'auto' to guess one.",
-    )
-    parser.add_argument("--baud", type=int, default=115200, help="Baud rate (default: 115200)")
-    parser.add_argument("--host", default="0.0.0.0", help="WebSocket bind address (default: 0.0.0.0)")
-    parser.add_argument("--ws-port", type=int, default=8765, help="WebSocket port (default: 8765)")
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(description="GNSS WebSocket server")
 
-    # NEW: user-friendly aliases
+    # NEW: allow JSON config file
     parser.add_argument(
-        "--label",
-        action="append",
-        default=[],
-        metavar="PORT:ALIAS",
-        help="Map a serial PORT to an ALIAS, e.g. --label COM27:ROVER --label COM9:BASE",
+        "--config",
+        type=str,
+        help="Path to JSON configuration file (e.g. config/gnss.json)"
     )
-    return parser.parse_args()
+
+    # existing flags (examples; keep yours if already defined)
+    parser.add_argument("--port", action="append", default=[], help="Serial port (repeatable)")
+    parser.add_argument("--label", action="append", default=[], help="Alias mapping PORT:NAME (repeatable)")
+    parser.add_argument("--baud", type=int, default=115200, help="Serial baud rate")
+    parser.add_argument("--host", default="127.0.0.1", help="WebSocket host")
+    parser.add_argument("--ws-port", dest="ws_port", type=int, default=8765, help="WebSocket port")
+
+    return parser.parse_args(argv)
 
 
 def normalize_ports(arg_ports):

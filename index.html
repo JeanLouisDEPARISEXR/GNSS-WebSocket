@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="fr">
   <head>
     <meta charset="utf-8" />
     <title>GNSS Live Position (Leaflet + WebSocket, Multi-Receivers)</title>
@@ -8,12 +8,11 @@
     <style>
       html, body { height: 100%; margin: 0; background: #0b0b0c; color: #eaeaea; }
       #app { height: 100%; display: grid; grid-template-rows: auto 1fr; }
-      header { padding: 10px 14px; display: flex; gap: 12px; align-items: center; border-bottom: 1px solid #232327; }
+      header { padding: 10px 14px; display: flex; gap: 16px; align-items: stretch; border-bottom: 1px solid #232327; }
+      .left { display:flex; gap:12px; align-items:center; }
       .dot { width:10px; height:10px; border-radius:50%; background:#ff5555; box-shadow:0 0 8px #ff5555aa; }
       .dot.ok { background:#50fa7b; box-shadow:0 0 8px #50fa7baa; }
       .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
-      .panel { display:flex; gap:18px; flex-wrap:wrap; align-items:baseline; font-size:14px; }
-      .panel strong { color: #fafafa; }
       #map { height: 100%; }
 
       /* -------- Custom tools control -------- */
@@ -46,20 +45,39 @@
       .legend { display:flex; flex-direction:column; gap:6px; margin-top:8px; font-size:12px; opacity:.9; }
       .legend-item { display:flex; align-items:center; gap:8px; }
       .chip { width:12px; height:12px; border-radius:50%; border:2px solid currentColor; }
+
+      /* -------- Per-device status rows -------- */
+      .stats { display:flex; flex-direction:column; gap:6px; flex:1; }
+      .stats-row {
+        display:grid; grid-template-columns: auto 1fr repeat(5, auto);
+        align-items:center; gap:10px; padding:6px 8px; border:1px solid #2a2a2f; border-radius:8px;
+        background:#15151a;
+      }
+      .stats-row .name { font: 600 13px/1.2 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; white-space:nowrap; }
+      .stats-row .badge { font:600 12px/1 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; padding:3px 8px; border-radius:999px; border:1px solid #2a2a2f; background:#101014; }
+      .badge.fixed { color:#0df27e; border-color:#0b5; }
+      .badge.float { color:#33bcff; border-color:#2a7; }
+      .badge.dgps { color:#ffe14d; border-color:#ccaa22; }
+      .badge.invalid, .badge.no-fix { color:#ff6b6b; border-color:#b33; }
+      .stats-row .kv { opacity:.95; font-size:13px; }
+      .stats-row .chip { width:10px; height:10px; border:2px solid currentColor; border-radius:50%; }
+      .stats-row .sep { opacity:.25; }
+
+      @media (max-width: 900px) {
+        .stats-row { grid-template-columns: auto 1fr auto; row-gap:4px; }
+        .stats-row .kv { font-size:12px; }
+        .hide-sm { display:none; }
+      }
     </style>
   </head>
   <body>
     <div id="app">
       <header>
-        <div id="statusDot" class="dot" title="WebSocket status"></div>
-        <div class="panel">
+        <div class="left">
+          <div id="statusDot" class="dot" title="WebSocket status"></div>
           <div><strong>WS:</strong> <span id="wsUrl" class="mono"></span></div>
-          <div><strong>Fix:</strong> <span id="fixQ">—</span></div>
-          <div><strong>Sats:</strong> <span id="sats">—</span></div>
-          <div><strong>HDOP:</strong> <span id="hdop">—</span></div>
-          <div><strong>Alt:</strong> <span id="alt">—</span> m</div>
-          <div><strong>UTC:</strong> <span id="utc">—</span></div>
         </div>
+        <div id="statsContainer" class="stats"></div>
       </header>
       <div id="map"></div>
     </div>
@@ -68,7 +86,7 @@
     <script>
       const WS_URL = 'ws://127.0.0.1:8765';
       document.getElementById('wsUrl').textContent = WS_URL;
-
+    
       // --- Base layers
       const osm = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
         maxZoom: 26, maxNativeZoom: 19, attribution: '&copy; OpenStreetMap contributors'
@@ -83,72 +101,87 @@
           maxZoom: 26, maxNativeZoom: 20, attribution: 'Tiles by <a href="http://stamen.com">Stamen</a>'
         }
       );
-
+    
       const map = L.map('map', { layers: [osm] }).setView([48.8566, 2.3522], 13);
       L.control.layers({ "OSM": osm, "Satellite": esriSat, "Toner Lite": tonerLite }, {}, { position: 'topleft' }).addTo(map);
-
+    
       const palette = ['#4CAF50','#1E90FF','#FF9800','#E91E63','#9C27B0','#00BCD4','#FFC107','#8BC34A'];
       const devices = new Map();
       let firstFix = true, follow = false, userPanned = false, activeSource = null;
-
-      // --- Custom Tools Panel ---
+    
+      // ---------- CPU governor: cap render to 10 fps (100 ms) ----------
+      let FRAME_MS = 100;               // 10 fps
+      const latestBySource = new Map(); // buffers last message per source
+      let needsDraw = false;
+      let lastFrameTs = 0;
+    
+      // Decimate track polyline updates (avoid heavy setLatLngs/addLatLng every frame)
+      const TRACK_MIN_INTERVAL_MS = 250;  // write to polyline at most 4 Hz
+      const TRACK_MIN_MOVE_M = 0.5;       // or if moved > 0.5 m
+      const lastTrackBySource = new Map(); // source -> { t: ts, latlng: L.LatLng }
+    
+      document.addEventListener('visibilitychange', () => {
+        // reduce work when tab not visible
+        FRAME_MS = (document.visibilityState === 'visible') ? 100 : 500;
+      });
+    
+      // --- Custom Tools Panel (unchanged UI)
       const ToolsControl = L.Control.extend({
         options: { position: 'topleft' },
         onAdd: function() {
           const wrapper = L.DomUtil.create('div', 'leaflet-control leaflet-control-custom');
           const box = L.DomUtil.create('div', 'tools-box', wrapper);
-
-          // Device selector
+    
           const secSel = L.DomUtil.create('div', 'section', box);
           secSel.innerHTML = `<div style="opacity:.8">Device</div>`;
           const sel = L.DomUtil.create('select', '', secSel);
           sel.id = 'deviceSelect';
           sel.addEventListener('change', () => { activeSource = sel.value || null; });
-
-          // Actions
+    
           const secAct = L.DomUtil.create('div', 'section', box);
           const bCenter = L.DomUtil.create('button', '', secAct); bCenter.textContent = 'Center';
           const bFollow = L.DomUtil.create('button', '', secAct); bFollow.id = 'btnFollow'; bFollow.innerHTML = `<span>Follow</span><span class="state" id="followState">OFF</span>`;
           const bClear = L.DomUtil.create('button', '', secAct); bClear.textContent = 'Clear Path';
-
+    
           L.DomEvent.disableClickPropagation(wrapper);
           L.DomEvent.on(bCenter,'click',(e)=>{L.DomEvent.preventDefault(e);centerOnActive();});
           L.DomEvent.on(bFollow,'click',(e)=>{L.DomEvent.preventDefault(e);setFollow(!follow);});
           L.DomEvent.on(bClear,'click',(e)=>{L.DomEvent.preventDefault(e);clearPaths();});
-
-          // Legend
+    
           const secLegend = L.DomUtil.create('div', 'section', box);
           secLegend.innerHTML = '<div style="opacity:.8">Legend</div><div class="legend" id="legendList"></div>';
-
+    
           return wrapper;
         }
       });
       map.addControl(new ToolsControl());
-
+    
       // Header bindings
-      const $fixQ=document.getElementById('fixQ'),$sats=document.getElementById('sats'),
-            $hdop=document.getElementById('hdop'),$alt=document.getElementById('alt'),
-            $utc=document.getElementById('utc'),$dot=document.getElementById('statusDot');
-      function setOnline(on){$dot.classList.toggle('ok',!!on);}
-      function updateStats(d){
-        $fixQ.textContent=d.fix_quality??'0';
-        $sats.textContent=d.num_sats??'0';
-        $hdop.textContent=d.hdop??'—';
-        $alt.textContent=d.alt_m??'—';
-        $utc.textContent=d.timestamp_utc??'—';
-      }
-
-      // Devices management
+      const $dot=document.getElementById('statusDot');
+      function setOnline(on){$dot.classList.toggle('ok',!!on);}      
+    
+      // Fix quality mapping
+      const FIX_LABELS = {
+        0: {text:'no-fix', cls:'no-fix'},
+        1: {text:'gps', cls:''},
+        2: {text:'dgps', cls:'dgps'},
+        3: {text:'pps', cls:''},
+        4: {text:'rtk-fixed', cls:'fixed'},
+        5: {text:'rtk-float', cls:'float'},
+        6: {text:'dead-reckoning', cls:''},
+        7: {text:'manual', cls:''},
+        8: {text:'sim', cls:''}
+      };
+    
       function ensureDevice(source){
         if(devices.has(source)) return devices.get(source);
         const color=palette[devices.size%palette.length];
-        const state={color,marker:null,circle:null,track:L.polyline([], {weight:3,color}).addTo(map),last:null};
+        const state={color,marker:null,circle:null,track:L.polyline([], {weight:3,color}).addTo(map),last:null,row:null};
         devices.set(source,state);
-
+    
         const sel=document.getElementById('deviceSelect');
         if(sel && ![...sel.options].some(o=>o.value===source)){
-          const opt=document.createElement('option'); opt.value=source; opt.textContent=source;
-          sel.appendChild(opt);
+          const opt=document.createElement('option'); opt.value=source; opt.textContent=source; sel.appendChild(opt);
           if(!activeSource){activeSource=source; sel.value=source;}
         }
         const list=document.getElementById('legendList');
@@ -158,9 +191,44 @@
           const text=document.createElement('span'); text.textContent=source;
           row.appendChild(chip); row.appendChild(text); list.appendChild(row);
         }
+        ensureStatsRow(source, color);
         return state;
       }
-
+    
+      function ensureStatsRow(source, color){
+        const container = document.getElementById('statsContainer');
+        let row = document.getElementById('stats_'+source);
+        if(row) return row;
+        row = document.createElement('div');
+        row.id = 'stats_'+source; row.className = 'stats-row';
+        row.innerHTML = `
+          <span class="chip" style="color:${color}"></span>
+          <span class="name">${source}</span>
+          <span class="badge invalid" data-k="fix">no-fix</span>
+          <span class="kv hide-sm">Sats: <b data-k="sats">—</b></span>
+          <span class="kv hide-sm">HDOP: <b data-k="hdop">—</b></span>
+          <span class="kv hide-sm">Alt: <b data-k="alt">—</b> m</span>
+          <span class="kv">UTC: <b data-k="utc">—</b></span>
+        `;
+        container.appendChild(row);
+        return row;
+      }
+    
+      function updateStatsFor(source, d){
+        const row = ensureStatsRow(source, ensureDevice(source).color);
+        const fix = Number.isFinite(d.fix_quality) ? d.fix_quality : 0;
+        const def = FIX_LABELS[fix] || {text:'unknown', cls:''};
+        const badge = row.querySelector('[data-k="fix"]');
+        badge.textContent = def.text;
+        badge.className = 'badge ' + (def.cls || (fix>0?'':'invalid'));
+    
+        const set = (k,v)=>{const el=row.querySelector(`[data-k="${k}"]`); if(el) el.textContent=(v??'—');};
+        set('sats', d.num_sats);
+        set('hdop', d.hdop);
+        set('alt', d.alt_m);
+        set('utc', d.timestamp_utc);
+      }
+    
       function setFollow(on){
         follow=!!on;
         const btn=document.getElementById('btnFollow'); const state=document.getElementById('followState');
@@ -175,24 +243,32 @@
         if(d?.last){map.setView(d.last,Math.max(map.getZoom(),20));userPanned=false;}
       }
       function clearPaths(){
-        devices.forEach((dev)=>{
-          dev.track.setLatLngs([]); // clear polyline
-        });
+        devices.forEach((dev)=>{ dev.track.setLatLngs([]); });
       }
-
+    
       function updatePositionFor(source,lat,lon,hdop){
-        const dev=ensureDevice(source); const latlng=[lat,lon]; dev.last=latlng;
+        const dev=ensureDevice(source); const latlng=L.latLng(lat,lon); dev.last=latlng;
         const radius=typeof hdop==='number'?Math.max(1,hdop*5):5;
         if(!dev.marker){dev.marker=L.circleMarker(latlng,{radius:6,weight:2,color:dev.color,fillOpacity:0.7}).addTo(map);}else dev.marker.setLatLng(latlng);
         if(!dev.circle){dev.circle=L.circle(latlng,{radius,color:dev.color,opacity:0.35}).addTo(map);}else dev.circle.setLatLng(latlng).setRadius(radius);
-        dev.track.addLatLng(latlng);
+    
+        // Decimate polyline writes (time + distance)
+        const last = lastTrackBySource.get(source);
+        const now = performance.now();
+        const movedEnough = !last || map.distance(last.latlng, latlng) > TRACK_MIN_MOVE_M;
+        const timeOk = !last || (now - last.t) >= TRACK_MIN_INTERVAL_MS;
+        if (movedEnough && timeOk) {
+          dev.track.addLatLng(latlng);
+          lastTrackBySource.set(source, { t: now, latlng });
+        }
+    
         if(firstFix){map.setView(latlng,20);firstFix=false;userPanned=false;}
         else if(follow && activeSource===source && !userPanned) map.panTo(latlng,{animate:true});
       }
-
+    
       map.on('dragstart zoomstart',()=>{userPanned=true;});
-
-      // WebSocket client
+    
+      // ---------------- WebSocket with buffering ----------------
       let ws,retry=0;
       function connect(){
         ws=new WebSocket(WS_URL);
@@ -203,18 +279,39 @@
           try{
             const d=JSON.parse(e.data);
             if(d.type==='gga'){
-              updateStats(d); const src=d.source||'dev';
-              if(typeof d.lat==='number'&&typeof d.lon==='number') updatePositionFor(src,d.lat,d.lon,d.hdop);
+              const src=d.source||'dev';
+              // buffer last per source; render loop will pick it at 10 fps
+              latestBySource.set(src, d);
+              needsDraw = true;
             }
           }catch{}
         };
       } connect();
-
+    
+      // ---------------- 10 fps render loop (throttled) ----------------
+      function drawFrame(ts){
+        requestAnimationFrame(drawFrame);
+        if (!needsDraw) return;
+        if (ts - lastFrameTs < FRAME_MS) return;
+        lastFrameTs = ts;
+        needsDraw = false;
+    
+        // Process only the *latest* data per source this frame
+        for (const [src, d] of latestBySource) {
+          updateStatsFor(src, d);
+          if (typeof d.lat === 'number' && typeof d.lon === 'number') {
+            updatePositionFor(src, d.lat, d.lon, d.hdop);
+          }
+        }
+      }
+      requestAnimationFrame(drawFrame);
+    
       // Keyboard shortcuts
       window.addEventListener('keydown',(e)=>{
         if(e.key.toLowerCase()==='c') centerOnActive();
         if(e.key.toLowerCase()==='f') setFollow(!follow);
       });
     </script>
+    
   </body>
 </html>

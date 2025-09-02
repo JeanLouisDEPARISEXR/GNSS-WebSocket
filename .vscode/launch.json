@@ -2,35 +2,13 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "GNSS WS Server (auto)",
+      "name": "GNSS WS Server (from config/gnss.json)",
       "type": "python",
       "request": "launch",
-      "module": "gnss_ws_server.main"
+      "module": "gnss_ws_server.main",
       "console": "integratedTerminal",
       "cwd": "${workspaceFolder}",
-      "args": [
-        "--port", "auto",
-        "--baud", "115200",
-        "--host", "127.0.0.1",
-        "--ws-port", "8765"
-      ]
-    },
-    {
-      "name": "GNSS WS Server (multi with labels)",
-      "type": "python",
-      "request": "launch",
-      "module": "gnss_ws_server.main"
-      "console": "integratedTerminal",
-      "cwd": "${workspaceFolder}",
-      "args": [
-        "--port", "COM27",
-        "--port", "COM9",
-        "--label", "COM27:BASE",
-        "--label", "COM9:ROVER",
-        "--baud", "115200",
-        "--host", "127.0.0.1",
-        "--ws-port", "8765"
-      ]
+      "args": ["--config", "${workspaceFolder}/config/gnss.json"]
     },
     {
       "name": "HTTP Server (index.html)",
@@ -39,15 +17,14 @@
       "module": "http.server",
       "console": "integratedTerminal",
       "cwd": "${workspaceFolder}",
-      "args": [
-        "8000"
-      ]
-    },
+      "args": ["8000"]
+    }
+  ],
+  "compounds": [
     {
-      "name": "Run Both: WS + HTTP",
-      "type": "compound",
+      "name": "Run Both: WS(JSON) + HTTP",
       "configurations": [
-        "GNSS WS Server (multi with labels)",
+        "GNSS WS Server (from config/gnss.json)",
         "HTTP Server (index.html)"
       ]
     }
