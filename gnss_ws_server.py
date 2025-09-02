@@ -1,27 +1,26 @@
 #!/usr/bin/env python3
 """
-Minimal GNSS/RTK WebSocket server that streams $GxGGA positions.
+GNSS/RTK WebSocket server streaming $GxGGA from one or more serial receivers.
 
-- Reads NMEA sentences from a USB/COM serial port.
-- Filters and parses $GxGGA (e.g., $GPGGA, $GNGGA, ...).
-- Broadcasts decoded position updates to all connected WebSocket clients.
-- JSON payload example:
+- Supports multiple serial ports (e.g., --port COM27 --port COM8) or
+  a comma-separated list (--port COM27,COM8). "auto" will try to guess one port.
+- Each outgoing JSON payload includes a "source" field to identify the receiver.
+
+Example run:
+    python gnss_ws_server.py --port COM27 --port COM8 --baud 115200 --host 127.0.0.1 --ws-port 8765
+
+Payload example:
   {
     "type": "gga",
-    "lat": 48.856614,
-    "lon": 2.3522219,
+    "source": "COM27",
+    "timestamp_utc": "12:34:56",
+    "lat": 48.8566,
+    "lon": 2.3522,
     "alt_m": 35.1,
     "fix_quality": 4,
     "num_sats": 18,
-    "hdop": 0.7,
-    "timestamp_utc": "12:34:56"
+    "hdop": 0.7
   }
-
-Dependencies:
-    pip install websockets pyserial
-
-Run:
-    python gnss_ws_server.py --port auto --baud 115200 --host 0.0.0.0 --ws-port 8765
 """
 
 from __future__ import annotations
@@ -33,20 +32,19 @@ import re
 import signal
 import sys
 import threading
-from typing import Any, Dict, Optional, Set
+from typing import Any, Dict, Optional, Set, List, Tuple
 
 import serial
 from serial import Serial, SerialException
 from serial.tools import list_ports
 from websockets.server import WebSocketServerProtocol, serve
 
-
 GGA_REGEX = re.compile(r"^\$(?:GP|GN|GL|GA|GB)GGA,")
 NMEA_LINE = re.compile(r"^\$.*\*[0-9A-Fa-f]{2}\s*$")
 
 
 def find_default_serial_port() -> Optional[str]:
-    """Try to guess the serial port of the GNSS device."""
+    """Try to guess a single serial port of a GNSS device."""
     candidates: list[str] = []
     for p in list_ports.comports():
         desc = (p.description or "").lower()
@@ -99,7 +97,7 @@ def ddmm_to_decimal(value: str, hemi: str, is_lat: bool) -> Optional[float]:
 
 
 def parse_gga(sentence: str) -> Optional[Dict[str, Any]]:
-    """Parse a GGA sentence and return structured data."""
+    """Parse a GGA sentence and return structured data (without 'source')."""
     if not GGA_REGEX.match(sentence):
         return None
     if not nmea_checksum_ok(sentence):
@@ -134,23 +132,25 @@ def parse_gga(sentence: str) -> Optional[Dict[str, Any]]:
 class SerialReader(threading.Thread):
     """
     Thread reading NMEA lines from a serial port and pushing them to the
-    asyncio loop thread-safely.
+    asyncio loop thread-safely, along with a 'source' tag.
     """
 
     def __init__(
         self,
+        source_name: str,
         port: str,
         baud: int,
-        queue: "asyncio.Queue[str]",
+        queue: "asyncio.Queue[Tuple[str, str]]",
         stop_event: threading.Event,
         loop: asyncio.AbstractEventLoop,
     ) -> None:
         super().__init__(daemon=True)
+        self.source_name = source_name
         self.port = port
         self.baud = baud
         self.queue = queue
         self.stop_event = stop_event
-        self.loop = loop  # main thread's event loop
+        self.loop = loop
 
     def run(self) -> None:
         try:
@@ -162,32 +162,32 @@ class SerialReader(threading.Thread):
                             continue
                         line = raw.decode("ascii", errors="ignore").strip()
                         if NMEA_LINE.match(line):
-                            # Schedule a thread-safe put into the asyncio queue.
                             self.loop.call_soon_threadsafe(
-                                self.queue.put_nowait, line
+                                self.queue.put_nowait, (self.source_name, line)
                             )
                     except SerialException:
                         break
         except SerialException as exc:
-            # Surface a synthetic message into the asyncio queue.
             self.loop.call_soon_threadsafe(
                 self.queue.put_nowait,
-                f"$ERR,SerialException,{str(exc)}*00",
+                (self.source_name, f"$ERR,SerialException,{str(exc)}*00"),
             )
 
 
 async def broadcaster(
-    queue: "asyncio.Queue[str]", clients: "Set[WebSocketServerProtocol]"
+    queue: "asyncio.Queue[Tuple[str, str]]",
+    clients: "Set[WebSocketServerProtocol]",
 ) -> None:
-    """Read GGA sentences from queue and broadcast to clients."""
+    """Read (source, line) from queue; if GGA, broadcast JSON with 'source'."""
     while True:
-        line = await queue.get()
+        source, line = await queue.get()
         if GGA_REGEX.match(line):
             data = parse_gga(line)
             if data is None:
                 continue
+            data["source"] = source
             payload = json.dumps(data)
-            dead: Set[WebSocketServerProtocol] = set()
+            dead = set()
             for ws in list(clients):
                 try:
                     await ws.send(payload)
@@ -199,7 +199,7 @@ async def broadcaster(
 
 async def ws_handler(
     websocket: WebSocketServerProtocol,
-    path: str,  # required by websockets signature
+    path: str,
     clients: "Set[WebSocketServerProtocol]",
 ) -> None:
     """Handle WebSocket client lifecycle."""
@@ -214,36 +214,79 @@ async def ws_handler(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="GNSS/RTK NMEA ($GxGGA) WebSocket server"
+        description="GNSS/RTK NMEA ($GxGGA) WebSocket server (multi-receiver)"
     )
-    parser.add_argument("--port", default="auto", help="Serial port (COMx or /dev/ttyACM0).")
-    parser.add_argument("--baud", type=int, default=115200, help="Baud rate (default 115200).")
-    parser.add_argument("--host", default="0.0.0.0", help="Bind address (default 0.0.0.0).")
-    parser.add_argument("--ws-port", type=int, default=8765, help="WebSocket port (default 8765).")
+    parser.add_argument(
+        "--port",
+        action="append",
+        default=[],
+        help=(
+            "Serial port(s). Repeat --port or use comma list (e.g., COM27,COM8). "
+            "Use 'auto' to guess one port."
+        ),
+    )
+    parser.add_argument("--baud", type=int, default=115200, help="Baud rate.")
+    parser.add_argument("--host", default="0.0.0.0", help="Bind address.")
+    parser.add_argument("--ws-port", type=int, default=8765, help="WebSocket port.")
     return parser.parse_args()
+
+
+def normalize_ports(arg_ports: List[str]) -> List[str]:
+    """Expand comma-separated and resolve 'auto' if present."""
+    ports: List[str] = []
+    for item in arg_ports:
+        if not item:
+            continue
+        for p in item.split(","):
+            p = p.strip()
+            if p:
+                ports.append(p)
+    if not ports:
+        # default to auto if nothing provided
+        ports = ["auto"]
+    # Resolve 'auto' into a single guessed port (keep order)
+    resolved: List[str] = []
+    for p in ports:
+        if p.lower() == "auto":
+            guessed = find_default_serial_port()
+            if guessed:
+                resolved.append(guessed)
+        else:
+            resolved.append(p)
+    # Deduplicate while preserving order
+    seen = set()
+    unique = []
+    for p in resolved:
+        if p not in seen:
+            seen.add(p)
+            unique.append(p)
+    return unique
 
 
 async def amain() -> None:
     args = parse_args()
-
-    # Obtain the running loop (this is the loop we must use from the serial thread).
     loop = asyncio.get_running_loop()
 
-    serial_port = find_default_serial_port() if args.port.lower() == "auto" else args.port
-    if not serial_port:
-        print("ERROR: Could not find serial device, specify --port", file=sys.stderr)
+    ports = normalize_ports(args.port)
+    if not ports:
+        print("ERROR: No serial ports found/resolved.", file=sys.stderr)
         sys.exit(2)
 
-    print(f"[INFO] Serial: {serial_port} @ {args.baud} baud")
     print(f"[INFO] WebSocket: ws://{args.host}:{args.ws_port}")
+    for p in ports:
+        print(f"[INFO] Serial: {p} @ {args.baud} baud")
 
-    queue: asyncio.Queue[str] = asyncio.Queue()
+    queue: asyncio.Queue[Tuple[str, str]] = asyncio.Queue()
     clients: Set[WebSocketServerProtocol] = set()
     stop_event = threading.Event()
 
-    # Pass the main loop into the serial thread.
-    reader = SerialReader(serial_port, args.baud, queue, stop_event, loop)
-    reader.start()
+    # Launch one reader per port
+    readers = [
+        SerialReader(source_name=p, port=p, baud=args.baud, queue=queue, stop_event=stop_event, loop=loop)
+        for p in ports
+    ]
+    for r in readers:
+        r.start()
 
     broadcaster_task = asyncio.create_task(broadcaster(queue, clients))
     async with serve(
@@ -253,8 +296,6 @@ async def amain() -> None:
         ping_interval=20,
         ping_timeout=20,
     ):
-        # Graceful shutdown
-        loop = asyncio.get_running_loop()
         stop_future = loop.create_future()
 
         def _stop() -> None:
@@ -265,12 +306,10 @@ async def amain() -> None:
             try:
                 loop.add_signal_handler(sig, _stop)
             except NotImplementedError:
-                # Signals may not be available on some platforms (e.g., Windows).
                 pass
 
         await stop_future
 
-    # Teardown.
     stop_event.set()
     broadcaster_task.cancel()
     try:
