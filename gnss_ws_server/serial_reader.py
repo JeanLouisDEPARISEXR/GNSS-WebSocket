@@ -1,13 +1,13 @@
 import threading
 from serial import Serial, SerialException
-from .nmea_parser import NMEA_LINE
+from .nmea_parser import NMEAParser
 
-class SerialReader(threading.Thread):
-    """Thread to read GNSS NMEA lines from a serial port and enqueue them."""
+class SerialGNSSReader(threading.Thread):
+    """Thread class for reading GNSS data from a serial port."""
 
-    def __init__(self, source_name, port, baud, queue, stop_event, loop):
+    def __init__(self, name: str, port: str, baud: int, queue, stop_event, loop):
         super().__init__(daemon=True)
-        self.source_name = source_name
+        self.name = name
         self.port = port
         self.baud = baud
         self.queue = queue
@@ -23,14 +23,14 @@ class SerialReader(threading.Thread):
                         if not raw:
                             continue
                         line = raw.decode("ascii", errors="ignore").strip()
-                        if NMEA_LINE.match(line):
+                        if NMEAParser.NMEA_LINE.match(line):
                             self.loop.call_soon_threadsafe(
-                                self.queue.put_nowait, (self.source_name, line)
+                                self.queue.put_nowait, (self.name, line)
                             )
                     except SerialException:
                         break
         except SerialException as exc:
             self.loop.call_soon_threadsafe(
                 self.queue.put_nowait,
-                (self.source_name, f"$ERR,SerialException,{str(exc)}*00"),
+                (self.name, f"$ERR,SerialException,{str(exc)}*00"),
             )

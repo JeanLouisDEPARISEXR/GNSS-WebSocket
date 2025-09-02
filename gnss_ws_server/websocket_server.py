@@ -1,39 +1,56 @@
 import asyncio
 import json
 from websockets.server import serve
-from .nmea_parser import GGA_REGEX, parse_gga
+from .nmea_parser import NMEAParser
 
-async def broadcaster(queue, clients):
-    """Read queue and broadcast GGA messages to all connected clients."""
-    while True:
-        source, line = await queue.get()
-        if GGA_REGEX.match(line):
-            data = parse_gga(line)
-            if not data:
-                continue
-            data["source"] = source
-            payload = json.dumps(data)
-            dead = set()
-            for ws in list(clients):
-                try:
-                    await ws.send(payload)
-                except Exception:
-                    dead.add(ws)
-            for ws in dead:
-                clients.discard(ws)
+class GNSSWebSocketServer:
+    def __init__(self, host: str, port: int, queue: asyncio.Queue):
+        self.host = host
+        self.port = port
+        self.queue = queue
+        self.clients = set()
+        self._server = None
+        self._task = None
 
-async def ws_handler(websocket, path, clients):
-    """Handle WebSocket connection lifecycle."""
-    clients.add(websocket)
-    try:
-        await websocket.send(json.dumps({"type": "hello", "msg": "connected"}))
-        async for _ in websocket:
-            pass
-    finally:
-        clients.discard(websocket)
+    async def start(self):
+        self._server = await serve(self._handler, self.host, self.port)
+        self._task = asyncio.create_task(self._broadcaster())
+        print(f"[INFO] WebSocket server listening on ws://{self.host}:{self.port}")
 
-async def start_server(host, ws_port, clients):
-    """Start and return a WebSocket server."""
-    server = await serve(lambda ws, p: ws_handler(ws, p, clients),
-                         host, ws_port, ping_interval=20, ping_timeout=20)
-    return server
+    async def _handler(self, websocket, path):
+        self.clients.add(websocket)
+        try:
+            await websocket.send(json.dumps({"type": "hello", "msg": "connected"}))
+            async for _ in websocket:
+                pass
+        finally:
+            self.clients.discard(websocket)
+
+    async def _broadcaster(self):
+        while True:
+            source, line = await self.queue.get()
+            if NMEAParser.GGA_REGEX.match(line):
+                data = NMEAParser.parse_gga(line)
+                if not data:
+                    continue
+                data["source"] = source
+                payload = json.dumps(data)
+                dead = []
+                for ws in list(self.clients):
+                    try:
+                        await ws.send(payload)
+                    except Exception:
+                        dead.append(ws)
+                for ws in dead:
+                    self.clients.discard(ws)
+
+    async def stop(self):
+        if self._server:
+            self._server.close()
+            await self._server.wait_closed()
+        if self._task:
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
