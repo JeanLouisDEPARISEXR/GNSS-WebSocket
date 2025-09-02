@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>GNSS Live Position (Leaflet + WebSocket)</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link
+      rel="stylesheet"
+      href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+      crossorigin=""
+    />
+    <style>
+      html, body {height: 100%; margin: 0; background: #0b0b0c; color: #eaeaea;}
+      #app {height: 100%; display: grid; grid-template-rows: auto 1fr;}
+      header {padding: 10px 14px; display: flex; align-items: center; gap: 12px; border-bottom: 1px solid #232327;}
+      .dot {width: 10px; height: 10px; border-radius: 50%; background: #ff5555; box-shadow: 0 0 8px #ff5555aa;}
+      .dot.ok {background: #50fa7b; box-shadow: 0 0 8px #50fa7baa;}
+      .mono {font-family: monospace;}
+      #map {height: 100%;}
+      .panel {display: flex; gap: 18px; flex-wrap: wrap; align-items: baseline; font-size: 14px;}
+      .panel strong {color: #fafafa;}
+    </style>
+  </head>
+  <body>
+    <div id="app">
+      <header>
+        <div id="statusDot" class="dot" title="WebSocket status"></div>
+        <div class="panel">
+          <div><strong>WS:</strong> <span id="wsUrl" class="mono"></span></div>
+          <div><strong>Fix:</strong> <span id="fixQ">—</span></div>
+          <div><strong>Sats:</strong> <span id="sats">—</span></div>
+          <div><strong>HDOP:</strong> <span id="hdop">—</span></div>
+          <div><strong>Alt:</strong> <span id="alt">—</span> m</div>
+          <div><strong>UTC:</strong> <span id="utc">—</span></div>
+        </div>
+      </header>
+      <div id="map"></div>
+    </div>
+
+    <!-- Load Leaflet first -->
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
+
+    <!-- Main script -->
+    <script>
+      const WS_URL = 'ws://127.0.0.1:8765';
+      document.getElementById('wsUrl').textContent = WS_URL;
+
+      const map = L.map('map').setView([48.8566, 2.3522], 13);
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        maxZoom: 19,
+        attribution: '&copy; OpenStreetMap contributors',
+      }).addTo(map);
+
+      let marker = null, circle = null;
+      const track = L.polyline([], {weight: 3}).addTo(map);
+      let firstFix = true;
+
+      const $fixQ = document.getElementById('fixQ');
+      const $sats = document.getElementById('sats');
+      const $hdop = document.getElementById('hdop');
+      const $alt  = document.getElementById('alt');
+      const $utc  = document.getElementById('utc');
+      const $dot  = document.getElementById('statusDot');
+
+      function setOnline(on) { $dot.classList.toggle('ok', !!on); }
+      function updateStats(d) {
+        $fixQ.textContent = d.fix_quality ?? '0';
+        $sats.textContent = d.num_sats ?? '0';
+        $hdop.textContent = d.hdop ?? '—';
+        $alt.textContent  = d.alt_m ?? '—';
+        $utc.textContent  = d.timestamp_utc ?? '—';
+      }
+      function updatePosition(lat, lon, hdop) {
+        const latlng = [lat, lon];
+        const radius = typeof hdop === 'number' ? Math.max(1, hdop * 5) : 5;
+        if (!marker) marker = L.marker(latlng).addTo(map); else marker.setLatLng(latlng);
+        if (!circle) circle = L.circle(latlng, {radius}).addTo(map); else circle.setLatLng(latlng).setRadius(radius);
+        track.addLatLng(latlng);
+        if (firstFix) { map.setView(latlng, 18); firstFix = false; }
+      }
+
+      let ws, retry = 0;
+      function connect() {
+        console.log('[WS] connecting to', WS_URL);
+        ws = new WebSocket(WS_URL);
+
+        ws.onopen = () => { console.log('[WS] open'); setOnline(true); retry = 0; };
+        ws.onclose = (ev) => {
+          console.warn('[WS] close', ev.code, ev.reason); setOnline(false);
+          const timeout = Math.min(10000, 500 * Math.pow(2, retry++));
+          setTimeout(connect, timeout);
+        };
+        ws.onerror = (err) => { console.error('[WS] error', err); try { ws.close(); } catch {} };
+        ws.onmessage = (e) => {
+          try {
+            const data = JSON.parse(e.data);
+            if (data.type === 'gga') {
+              updateStats(data);
+              if (typeof data.lat === 'number' && typeof data.lon === 'number')
+                updatePosition(data.lat, data.lon, data.hdop);
+            }
+          } catch (ex) { console.error('[WS] parse error', ex, e.data); }
+        };
+      }
+      connect();
+    </script>
+  </body>
+</html>
